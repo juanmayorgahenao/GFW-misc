@@ -1,0 +1,393 @@
+---
+title: "Annual fishing effort"
+output: html_notebook
+---
+
+
+```{r, echo = F, warning=FALSE, message=FALSE, prompt=FALSE}
+suppressPackageStartupMessages(
+  easypackages::libraries("tidyverse", "bigrquery",  "DBI", 'knitr', 'ggsci', "sf")
+  )
+# 
+extrafont::loadfonts(quiet = TRUE)
+```
+
+```{r, message = F}
+BQ_connection <-  dbConnect(bigquery(), 
+                            project = 'world-fishing-827',
+                            dataset = "gfw_research", 
+                            billing = "world-fishing-827", 
+                            use_legacy_sql = FALSE) 
+
+knitr::opts_chunk$set(connection = "BQ_connection")
+```
+
+```{sql, connection = "BQ_connection", output.var = "fishing_effort_2018"}
+WITH
+  --######################################
+  --# this subquery identifies good segments
+  --######################################
+  good_segments AS (
+  SELECT
+    seg_id
+  FROM
+    `gfw_research.pipe_production_b_segs`
+  WHERE
+    good_seg
+    AND positions > 5
+    AND NOT overlapping_and_short),
+  --#
+  --#
+  --######################################
+  --# what are we counting as fishing vessels and what are their characteristics?
+  --######################################
+  fishing_vessels AS (
+  SELECT
+    CAST(mmsi AS string) ssvid,
+    best_flag,
+    CASE
+      WHEN mmsi IN (503770000,  224721000) THEN "fixed_gear"
+      WHEN mmsi IN(257007390,
+      645450000) THEN "other_fishing"
+      WHEN mmsi = 412420624 THEN "squid_jigger"
+      ELSE best_label
+    END geartype
+  FROM
+    -- this is the most up to date version of best_label
+    `gfw_research.vessel_info_allyears_20190102`
+  WHERE
+    -- it isn't offsetting
+    offsetting IS FALSE
+    -- it isn't spoofing
+    AND (spoofing_factor IS NULL
+      OR spoofing_factor < 1.05)
+    AND (spoofing_days < 5
+      OR spoofing_days IS NULL)
+    -- these are a list of problematic vessels, and two offsetting ones that were
+    -- not included in offsetting from  `gfw_research.vessel_info_allyears_20190102`
+    AND mmsi NOT IN (150201423,900025350,900007138,900007140,800018712,150200252,150201498,150203020,900025393,412211196,441301074,440296000,412437962,150200895,431439000,150201019,112420884,412327493,412364739,412333121,412322953,412322547,413035015,412366238,412322587,412323207,150200250,412322952,412211691,412364066,926004388,412490622,412328279,998500168,412322866,412327422,413066568,412358888,412327269,413003107,9102213,413825764,412327285,412322768,244710192,412322329,412007701,412330394,412428374,412661896,800011012,412209123,412200998,312405000,376708000,372624576,353001415,122408213,371502000,412320027,412221111,461000467,235076275,657985000,428051000,272108800,272089300,577357000,345000002,235076275,81560803,657105700,613795000,613696305,620243000,657733000,366761170 ) )
+  --#
+  --#
+  --######################################
+  --# Fishing hours geartype, bined at .5 degree
+  --######################################
+SELECT
+  FLOOR(lat*2)/2 + .5 lat_bin,
+  FLOOR(lon*2)/2 + .5 lon_bin,
+  SUM(hours) fishing_hours,
+  geartype
+FROM
+  `gfw_research.pipe_production_b_fishing`
+JOIN
+  fishing_vessels
+USING
+  (ssvid)
+WHERE
+  _partitiontime BETWEEN  TIMESTAMP("2016-12-31") and TIMESTAMP("2018-01-01")
+  and seg_id in (select seg_id from good_segments) and nnet_score2 = 1
+GROUP BY
+  lat_bin,
+  lon_bin,
+  geartype
+```
+
+```{r}
+my_theme_map <- function (base_size = 9, base_family = "") {
+  
+  theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+    theme(axis.line = element_blank(), axis.text = element_blank(),
+          axis.ticks = element_blank(), axis.title = element_blank(),
+          panel.background = element_blank(), panel.border = element_blank(),
+          panel.spacing = unit(0, "lines"), plot.background = element_blank(),
+          panel.grid = element_line(color = "transparent"),
+          legend.position = 'bottom', 
+          legend.margin = margin(t = 0, r = 0, b = 0, l = -.8, unit='cm'))
+}
+```
+
+
+
+```{r}
+fishing_effort_2018 %>% 
+  group_by(lat_bin, lon_bin) %>% 
+  summarise(fishing_hours = sum(fishing_hours, na.rm = T)) %>% 
+  ungroup() %>% 
+  filter(fishing_hours > 10) %>% 
+  ggplot()+
+  geom_raster(aes(x = lon_bin, y = lat_bin, fill = (fishing_hours)))+
+  scale_fill_gradientn(colours = pals::parula(100),
+                       "fishing hours",
+                       guide = "colourbar",
+                       trans = "log",
+                       breaks = scales::log_breaks(n = 5, base = 2))+
+    theme(plot.title = element_text(color="black",hjust=0,vjust=1, size=rel(1)),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill ="white"),
+        legend.text = element_text(color = "black", size = rel(1)),
+        legend.title = element_text(color = "black", size = rel(1)),
+        legend.title.align = 1,
+        legend.background = element_rect(fill="white"),
+        legend.position = "bottom",
+        legend.key.width = unit(1.5, "cm"),
+        legend.margin = margin(t = -.7, unit = 'cm'),
+        legend.key.height = unit(.2, "cm"),
+        legend.justification = "center",
+        axis.text = element_text(color = "black", size = rel(1))) +
+    labs(y = "", x = "")+
+  my_theme_map()
+```
+
+
+####
+
+```{r}
+theme_media_maps_light <- function(){
+  theme(plot.title = element_text(color = "black", hjust = 0,vjust = 1, size = rel(1)),
+        plot.subtitle = element_text(color = "black", hjust = 0,vjust = 1, size = rel(1)),
+        plot.caption = element_text(color = "black", hjust = 0, vjust = 1, size = rel(1)),
+        plot.background = element_rect(fill = "white"),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour = 'transparent'),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(color = "black", size = rel(1)),
+        legend.title = element_text(color = "black", size = rel(1)),
+        legend.title.align = 1,
+        legend.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        legend.key.width = unit(2, "cm"),
+        legend.margin = margin(t = 0, unit = 'cm'),
+        legend.key.height = unit(.2, "cm"),
+        #text = element_text(family = "MyriadPro-Regular"),
+        legend.justification = "center")
+  }
+```
+
+```{r}
+effort_raster <-  fishing_effort_2018 %>% 
+  group_by(lon_bin, lat_bin) %>% 
+  summarise(fishing_hours = sum(fishing_hours, na.rm = T)) %>% 
+  ungroup() %>% 
+  filter(fishing_hours > 5) %>% 
+  raster::rasterFromXYZ(crs = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs") %>% 
+  raster::projectRaster(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs", 
+                          over = TRUE)
+  
+effort_df <- data.frame(raster::rasterToPoints(effort_raster))
+  
+names(effort_df) <- c('long','lat','fishing_hours')
+  
+
+roundUp <- function(x,to=10)
+{
+  to*(x%/%to + as.logical(x%%to))
+}
+
+quant_2.5 <- roundUp(quantile(effort_df$fishing_hours, probs = c(.025,.975)),100)[[1]]
+quant_97.5 <- roundUp(quantile(effort_df$fishing_hours, probs = c(.025,.975)),1000)[[2]]
+  
+effort_df$fishing_hours[effort_df$fishing_hours >= quant_97.5] <- quant_97.5
+effort_df$fishing_hours[effort_df$fishing_hours <= quant_2.5] <- quant_2.5
+```
+
+```{r}
+world_map_fill <- rnaturalearth::ne_countries(scale = 'small', returnclass = c("sf"))
+
+world_eez <- sf::read_sf('../../Google Drive - UCSB/shapefiles/worlds_eez/World_EEZ_v10_20180221/eez_v10.shp')
+
+world_eez_simple <- rmapshaper::ms_simplify(world_eez, keep = 0.01)
+
+sf::st_write(world_eez_simple, '../../Google Drive - UCSB/shapefiles/worlds_eez/World_EEZ_v10_20180221/eez_v10_simpler.shp')
+
+(effort_map <- effort_df %>%
+    ggplot()+
+    geom_raster(aes(x = long, y = lat, fill = fishing_hours),
+                interpolate = F, 
+                show.legend = T) + 
+    geom_sf(data = world_map_fill, size = .2, fill = "gray30", col = "gray30") +
+    geom_sf(data = world_eez_simple, size = .2,  col = "black", fill = "gray", alpha = 0.6) +
+    coord_sf(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs")+
+    scale_fill_gradientn(colours = pals::parula(100), 
+                         "Fishing hours",
+                         guide = "colourbar",
+                         trans = "log",
+                         breaks = c(10,100,1000,10000,100000),
+                         labels = c(10,100,1000,10000,'>100000')
+                         ) +
+    labs(x = "",
+         y = "",
+         title = "")+
+    guides(fill = guide_colourbar(title.position = "top", 
+                                    title.hjust = 0.5,
+                                    label.theme = element_text(angle = 0, size = 9, colour = "black")))+
+    scale_x_continuous(expand = c(0,0))+
+    scale_y_continuous(expand = c(0,0))+
+    theme_media_maps_light())
+
+ggplot2::ggsave("ais_effort_map_2018.png",
+                effort_map, width = 12, height = 7.1,  dpi = 600 ) 
+```
+
+
+## Indonesia VMS
+
+```{sql, connection = "BQ_connection", output.var = "indo_fishing_effort_2018"}
+SELECT
+  FLOOR(lat*2)/2 + .5 lat_bin,
+  FLOOR(lon*2)/2 + .5 lon_bin,
+  SUM(hours) fishing_hours
+FROM (
+  SELECT
+    *,
+    IF(prev_lat IS NULL
+      OR prev_lon IS NULL
+      OR (ABS(prev_lat - lat) < .0001
+        AND ABS(prev_lon- lon) < .0001 ),
+      0,
+      ACOS(COS(0.01745329251*(90-lat)) *COS(0.01745329251*(90-prev_lat)) +SIN(0.01745329251*(90-lat)) *SIN(0.01745329251*(90-prev_lat)) * COS(0.01745329251*(lon-prev_lon)))*6371000) prev_gapmeters,
+    IF(next_lat IS NULL
+      OR next_lon IS NULL
+      OR ( ABS(next_lat-lat)<.0001
+        AND ABS(next_lon- lon)<.0001),
+      0,
+      ACOS(COS(0.01745329251*(90-lat)) *COS(0.01745329251*(90-next_lat)) +SIN(0.01745329251*(90-lat)) *SIN(0.01745329251*(90-next_lat)) * COS(0.01745329251*(lon-next_lon)))*6371000) next_gapmeters,
+    IF(last_timestamp IS NOT NULL,
+      (TIMESTAMP_DIFF(timestamp, last_timestamp, microsecond)/2)/3600000000,
+      0) + IF(next_timestamp IS NOT NULL,
+      (TIMESTAMP_DIFF(next_timestamp, timestamp, microsecond)/2)/3600000000,
+      0) hours
+  FROM (
+    SELECT
+      *,
+      LAG(timestamp, 1) OVER (PARTITION BY seg_id ORDER BY timestamp) last_timestamp,
+      LEAD(timestamp,1) OVER (PARTITION BY seg_id ORDER BY timestamp) next_timestamp,
+      LAG(lat, 1) OVER (PARTITION BY seg_id ORDER BY timestamp) prev_lat,
+      LEAD(lat,1) OVER (PARTITION BY seg_id ORDER BY timestamp) next_lat,
+      LAG(lon, 1) OVER (PARTITION BY seg_id ORDER BY timestamp) prev_lon,
+      LEAD(lon,1) OVER (PARTITION BY seg_id ORDER BY timestamp) next_lon
+    FROM
+      `world-fishing-827.pipe_indonesia_production_v20181029.messages_scored*`
+    WHERE
+      _TABLE_SUFFIX >= '2018-01-01'))
+WHERE
+  nnet_score = 1
+GROUP BY
+  lat_bin,
+  lon_bin
+```
+
+```{r}
+indo_effort_raster <-  indo_fishing_effort_2018 %>% 
+  group_by(lon_bin, lat_bin) %>% 
+  summarise(fishing_hours = sum(fishing_hours, na.rm = T)) %>% 
+  ungroup() %>% 
+  filter(fishing_hours > 5) %>% 
+  raster::rasterFromXYZ(crs = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs") %>% 
+  raster::projectRaster(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs", 
+                          over = TRUE)
+  
+indo_effort_raster <- data.frame(raster::rasterToPoints(indo_effort_raster))
+  
+names(indo_effort_raster) <- c('long','lat','fishing_hours')
+  
+
+quant_2.5 <- roundUp(quantile(indo_effort_raster$fishing_hours, probs = c(.025,.975)),100)[[1]]
+quant_97.5 <- roundUp(quantile(indo_effort_raster$fishing_hours, probs = c(.025,.975)),1000)[[2]]
+  
+indo_effort_raster$fishing_hours[indo_effort_raster$fishing_hours >= quant_97.5] <- quant_97.5
+indo_effort_raster$fishing_hours[indo_effort_raster$fishing_hours <= quant_2.5] <- quant_2.5
+```
+
+
+```{r}
+(indo_effort_map <- indo_effort_raster %>%
+    ggplot()+
+    geom_raster(aes(x = long, y = lat, fill = fishing_hours),
+                interpolate = F, 
+                show.legend = T) + 
+    geom_sf(data = world_map_fill, size = .2, fill = "gray30", col = "gray30") +
+    geom_sf(data = world_eez_simple, size = .2,  col = "black", fill = "gray", alpha = 0.4) +
+    #coord_sf(crs = "+proj=wintri")+
+    coord_sf(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs")+
+    scale_fill_gradientn(colours = pals::parula(100), 
+                         "Fishing hours",
+                         guide = "colourbar",
+                         trans = "log",
+                         breaks = c(10,100,1000,10000,100000),
+                         labels = c(10,100,1000,10000,'>100000')
+                         ) +
+    labs(x = "",
+         y = "",
+         title = "Fishing Effort in 2018")+
+    guides(fill = guide_colourbar(title.position = "top", 
+                                    title.hjust = 0.5,
+                                    label.theme = element_text(angle = 0, size = 9, colour = "black")))+
+    scale_x_continuous(expand = c(0,0))+
+    scale_y_continuous(expand = c(0,0))+
+    theme_media_maps_light())
+```
+
+
+
+## AIS + Indo VMS
+
+```{r}
+ais_vms_effort_2018_raster <- bind_rows(indo_fishing_effort_2018 %>% 
+                                   select (lat_bin, lon_bin, fishing_hours),
+                                 fishing_effort_2018 %>% 
+                                   select (lat_bin, lon_bin, fishing_hours)) %>% 
+  group_by(lon_bin, lat_bin) %>% 
+  summarise(fishing_hours = sum(fishing_hours, na.rm = T)) %>% 
+  ungroup() %>% 
+  filter(fishing_hours >= 9) %>% 
+  raster::rasterFromXYZ(crs = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs") %>% 
+  raster::projectRaster(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs", 
+                          over = TRUE)
+
+ais_vms_effort_2018_raster <- data.frame(raster::rasterToPoints(ais_vms_effort_2018_raster))
+  
+names(ais_vms_effort_2018_raster) <- c('long','lat','fishing_hours')
+  
+(ais_vms_effort_map <- ais_vms_effort_2018_raster %>%
+    ggplot()+
+    geom_raster(aes(x = long, y = lat, fill = fishing_hours),
+                interpolate = F, 
+                show.legend = T) + 
+    geom_sf(data = world_map_fill, size = .2, fill = "gray30", col = "gray30") +
+    geom_sf(data = world_eez_simple, size = .2,  col = "black", fill = "gray", alpha = 0.4) +
+    coord_sf(crs = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs")+
+    scale_fill_gradientn(#colours = pals::parula(100), 
+                         colours = c('#0C276C', '#1D5780',  '#00FFC3', "#53fcd3"),
+                         #colours = c('#0C276C', '#3B9088', '#EEFF00', '#ffffff'),
+                         "Fishing hours",
+                         guide = "colourbar",
+                         trans = "log",
+                         breaks = c(10,100,1000,10000,100000),
+                         labels = c(10,100,1000,10000,'>100000')
+                         ) +
+    labs(x = "",
+         y = "",
+         title = "")+
+    guides(fill = guide_colourbar(title.position = "top", 
+                                    title.hjust = 0.5,
+                                    label.theme = element_text(angle = 0, size = 9, colour = "black")))+
+    scale_x_continuous(expand = c(0,0))+
+    scale_y_continuous(expand = c(0,0))+
+    theme_media_maps_light())
+
+
+ggplot2::ggsave("ais_vms_effort_map_2018_blue.png",
+                ais_vms_effort_map, width = 12, height = 7.1,  dpi = 600 ) 
+
+```
+
+
+
+
+
